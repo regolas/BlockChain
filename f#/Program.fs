@@ -44,37 +44,36 @@ type Block (data : byte[]) =
 
 [<AbstractClass; Sealed>]
 type BlockExtension =
-    static member GenerateHash (data : byte[], prevHash : byte[], nonce:int,timeStamp) =
+    static member GenerateHash (data : byte[], prevHash : byte[], nonce:int,timeStamp:DateTime) =
         let mutable sha512 = SHA512.Create()
         let ms = new MemoryStream()
         let bw = new BinaryWriter(ms)
         bw.Write(data)
         bw.Write(prevHash)
         bw.Write(nonce)
-        bw.Write(timeStamp.ToString())
+        bw.Write(timeStamp.Ticks)
         let s = ms.ToArray()
         sha512.ComputeHash(s)
 
-    static member MineHash (data : byte[], prevHash : byte[], nonce:int,timeStamp,difficulty:byte[]) =
-        let mutable hash:byte[] = [|0uy|]
+    static member MineHash (block: IBlock, difficulty: byte[]) =
+        let mutable hash:byte[] = Array.empty<byte>
         let maxIterations = Int32.MaxValue
         let mutable iterations = 0
-        let mutable currentNonce = nonce
-        if difficulty = null then raise (ArgumentNullException(nameof(difficulty))) // ArgumentNullException handling
-        if difficulty.Length > 32 then raise (ArgumentException("Difficulty is too long")) // ArgumentException handling
-        
-        while not (hash.Take(2).SequenceEqual(difficulty)) do
+        let mutable currentNonce = block.Nonce // Start with the block's current nonce
+
+        if difficulty = null then raise (ArgumentNullException(nameof(difficulty)))
+        if difficulty.Length > 32 then raise (ArgumentException("Difficulty is too long"))
+
+        while not (hash.Take(difficulty.Length).SequenceEqual(difficulty)) do // Use difficulty.Length
             if iterations >= maxIterations then
                 raise (InvalidOperationException("Max iterations reached. Mining failed."))
-            
+
             currentNonce <- currentNonce + 1
-            let block = new Block(data)
-            (block :> IBlock).PrevHash <- prevHash
-            (block :> IBlock).Nonce <- currentNonce
-            (block :> IBlock).TimeStamp <- timeStamp
-            hash <- BlockExtension.GenerateHash(data, prevHash, currentNonce, timeStamp)
+            block.Nonce <- currentNonce // Update the nonce of the input block
+            hash <- BlockExtension.GenerateHash(block.Data, block.PrevHash, block.Nonce, block.TimeStamp)
+            block.Hash <- hash // Update the hash of the input block
             iterations <- iterations + 1
-        hash
+        hash // Return the found hash (though the block's hash is also updated)
     
     static member IsValid(data: byte[], prevHash: byte[], nonce: int, timeStamp: DateTime, expectedHash: byte[]) : bool =
         let generatedHash = BlockExtension.GenerateHash(data, prevHash, nonce, timeStamp)
@@ -83,7 +82,7 @@ type BlockExtension =
 type BlockChain(difficulty: byte[], genesis: IBlock) =
     let mutable items = List.empty<IBlock>
     do
-        genesis.Hash <- BlockExtension.MineHash(genesis.Data, genesis.PrevHash, genesis.Nonce, genesis.TimeStamp, difficulty)
+        genesis.Hash <- BlockExtension.MineHash(genesis, difficulty)
         items <- [genesis] // Ensure items is initialized with the genesis block
             
     member this.Difficulty = difficulty
@@ -93,7 +92,7 @@ type BlockChain(difficulty: byte[], genesis: IBlock) =
         | [] -> raise (InvalidOperationException("Blockchain is not initialized with a genesis block."))
         | lastBlock :: _ ->
             item.PrevHash <- lastBlock.Hash
-            item.Hash <- BlockExtension.MineHash(item.Data, item.PrevHash, item.Nonce, item.TimeStamp, difficulty)
+            item.Hash <- BlockExtension.MineHash(item, difficulty)
             items <- item :: items
 
     member this.Items
@@ -120,14 +119,30 @@ type BlockChain(difficulty: byte[], genesis: IBlock) =
         let rec validateChain (blocks: IBlock list) =
             match blocks with
             | [] | [_] -> true // Empty chain or single block is valid
-            | current :: next :: rest ->
-                // Check if the next block's prevHash matches the current block's hash
-                if not (next.PrevHash.SequenceEqual(current.Hash)) then false
-                // Check if the current block's hash is valid
-                elif not (BlockExtension.IsValid(current.Data, current.PrevHash, current.Nonce, current.TimeStamp, current.Hash)) then false
-                else validateChain (next :: rest)
+            | current :: next :: rest -> // 'current' is the block being validated, 'next' is the previous one
+                //printfn "Validating block with Hash: %s" (BitConverter.ToString(current.Hash).Replace("-", ""))
+                //printfn "  Current PrevHash: %s" (BitConverter.ToString(current.PrevHash).Replace("-", ""))
+                //printfn "  Expected PrevHash (Hash of next block): %s" (BitConverter.ToString(next.Hash).Replace("-", ""))
+                let prevHashMatches = current.PrevHash.SequenceEqual(next.Hash)
+                //printfn "  Previous Hash Matches: %b" prevHashMatches
+
+                let generatedHash = BlockExtension.GenerateHash(current.Data, current.PrevHash, current.Nonce, current.TimeStamp)
+                let hashMatches = generatedHash.SequenceEqual(current.Hash)
+                //printfn "  Generated Hash: %s" (BitConverter.ToString(generatedHash).Replace("-", ""))
+                //printfn "  Current Hash Matches Expected: %b" hashMatches
+
+                if not prevHashMatches then
+                    printfn "  ERROR: Previous hash mismatch!"
+                    false
+                elif not hashMatches then
+                    printfn "  ERROR: Hash mismatch for current block!"
+                    false
+                else
+                    validateChain (next :: rest) // Move to the next pair of blocks
         
-        validateChain items // No need to reverse since we're checking in the correct order
+        match items with
+        | [] -> true // An empty chain is considered valid
+        | _ :: rest -> validateChain items
 
     interface IEnumerable<IBlock> with
         member this.GetEnumerator() : IEnumerator<IBlock> =
