@@ -1,9 +1,10 @@
-﻿// For more information see https://aka.ms/fsharp-console-apps
+﻿﻿// For more information see https://aka.ms/fsharp-console-apps
 open System.Security.Cryptography
 open System.Linq
 open System.IO
 open System.Collections
 open System
+open System.Collections.Generic
 
 type IBlock =
     abstract member Data: byte[] with get
@@ -78,10 +79,84 @@ type BlockExtension =
     static member IsValid(data: byte[], prevHash: byte[], nonce: int, timeStamp: DateTime, expectedHash: byte[]) : bool =
         let generatedHash = BlockExtension.GenerateHash(data, prevHash, nonce, timeStamp)
         generatedHash.SequenceEqual(expectedHash)
+    
+type BlockChain(difficulty: byte[], genesis: IBlock) =
+    let mutable items = List.empty<IBlock>
+    do
+        genesis.Hash <- BlockExtension.MineHash(genesis.Data, genesis.PrevHash, genesis.Nonce, genesis.TimeStamp, difficulty)
+        items <- [genesis] // Ensure items is initialized with the genesis block
+            
+    member this.Difficulty = difficulty
 
-    //static member CreateGenesisBlock () =
-    //    let data = System.Text.Encoding.UTF8.GetBytes("Genesis Block")
-    //    BlockExtension.CreateBlock(data)
+    member this.Add(item: IBlock) =
+        match items with
+        | [] -> raise (InvalidOperationException("Blockchain is not initialized with a genesis block."))
+        | lastBlock :: _ ->
+            item.PrevHash <- lastBlock.Hash
+            item.Hash <- BlockExtension.MineHash(item.Data, item.PrevHash, item.Nonce, item.TimeStamp, difficulty)
+            items <- item :: items
+
+    member this.Items
+        with get() = items
+        and set(value) = items <- value
+
+    member this.Count = List.length items
+
+    member this.Item
+        with get(index: int) = List.item index items
+        and set(index: int) (value: IBlock) = 
+            let mutable itemsArray = items |> List.toArray
+            itemsArray.[index] <- value
+            items <- itemsArray |> List.ofArray
+    
+    // Get the last block in the chain
+    member this.LastBlock =
+        match items with
+        | [] -> None
+        | head :: _ -> Some head
+    
+    // Check if the blockchain is valid
+    member this.IsValid() =
+        let rec validateChain (blocks: IBlock list) =
+            match blocks with
+            | [] | [_] -> true // Empty chain or single block is valid
+            | current :: next :: rest ->
+                // Check if the next block's prevHash matches the current block's hash
+                if not (next.PrevHash.SequenceEqual(current.Hash)) then false
+                // Check if the current block's hash is valid
+                elif not (BlockExtension.IsValid(current.Data, current.PrevHash, current.Nonce, current.TimeStamp, current.Hash)) then false
+                else validateChain (next :: rest)
+        
+        validateChain items // No need to reverse since we're checking in the correct order
+
+    interface IEnumerable<IBlock> with
+        member this.GetEnumerator() : IEnumerator<IBlock> =
+            let seq = items |> Seq.ofList
+            seq.GetEnumerator()
+
+    interface IEnumerable with
+        member this.GetEnumerator() : IEnumerator =
+            let seq = items |> Seq.ofList
+            (seq :> IEnumerable).GetEnumerator()
 
 [<EntryPoint>]
-printfn "Hello from F#"
+let main argv =
+    printfn "Hello from F#"
+    let ran = Random()
+    let genesis: IBlock = Block([|0x00uy; 0x00uy; 0x00uy; 0x00uy; 0x00uy|])
+    let difficulty = [|0x00uy; 0x00uy|]
+    let chain = BlockChain(difficulty, genesis)
+
+    for i in 0 .. 199 do
+        let data = Enumerable.Range(0, 255).Select(fun _ -> byte (ran.Next())).ToArray()
+        chain.Add(Block(data))
+        match chain.LastBlock with
+        | Some block -> printfn "%s" (block.ToString())
+        | None -> printfn "No blocks in chain"
+        
+        if chain.IsValid() then
+            printfn "BlockChain is valid"
+        else
+            printfn "Chain is invalid"
+    
+    0 // Return an integer exit code
